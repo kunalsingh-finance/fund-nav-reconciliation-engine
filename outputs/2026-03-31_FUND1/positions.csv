@@ -1,0 +1,5 @@
+date,fund_id,security_id,quantity_eod,price_local,security_currency,fx_to_base,market_value_base,corporate_action_flag
+2026-03-31,FUND1,AAPL,200.0,166.22,USD,1.0,33244.0,DIV
+2026-03-31,FUND1,AMZN,100.0,125.87,USD,1.0,12587.0,DIV
+2026-03-31,FUND1,GOOGL,100.0,83.02,USD,1.0,8302.0,DIV
+2026-03-31,FUND1,MSFT,100.0,332.61,USD,1.0,33261.0,DIV

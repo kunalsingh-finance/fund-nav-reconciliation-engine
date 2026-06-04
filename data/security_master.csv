@@ -1,0 +1,5 @@
+security_id,name,sector,currency,asset_class,multiplier
+AAPL,Apple Inc.,Technology,USD,Equity,1.0
+MSFT,Microsoft Corporation,Technology,USD,Equity,1.0
+GOOGL,Alphabet Inc.,Communication Services,USD,Equity,1.0
+AMZN,"Amazon.com, Inc.",Consumer Discretionary,USD,Equity,1.0

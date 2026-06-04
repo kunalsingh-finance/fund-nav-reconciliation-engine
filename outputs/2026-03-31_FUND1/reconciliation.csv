@@ -1,0 +1,5 @@
+date,fund_id,break_type,severity,internal_value,custodian_value,diff_bps,details,resolution
+2026-03-31,FUND1,MISSING_POSITION,HIGH,100.0,,,GOOGL is missing from one side of the reconciliation.,Confirm trade booking - position exists in one source only.
+2026-03-31,FUND1,NAV_BREAK,HIGH,1264724.5460671233,1256222.55,67.22409313207102,Internal NAV differs from custodian NAV beyond policy tolerance.,Investigate price and cash discrepancies before NAV publication.
+2026-03-31,FUND1,CASH_BREAK,MEDIUM,1177169.29,1176919.29,2.123738719007867,Cash balance mismatch between internal books and custodian balance.,Trace cash movements against custodian cash statement.
+2026-03-31,FUND1,PRICE_BREAK,MEDIUM,166.22,166.47,15.040308025508363,Price discrepancy greater than $0.01 for AAPL.,Verify price source and override if custodian price is confirmed.

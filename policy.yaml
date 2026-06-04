@@ -1,0 +1,15 @@
+base_currency: USD
+nav_tolerance_bps: 10.0
+price_source_priority:
+  - internal
+  - vendor
+  - fallback
+max_price_staleness_days: 3
+fund_id_default: FUND1
+cash_interest_rate: 0.0500
+corporate_actions_enabled: true
+sofr_rate_source: FRED
+fund_benchmark_map:
+  FUND1: SPY
+  FUND_GROWTH: QQQ
+  FUND_INCOME: SCHD
