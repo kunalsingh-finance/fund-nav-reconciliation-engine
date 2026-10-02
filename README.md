@@ -16,7 +16,7 @@ The bundled inputs are synthetic demo records. The project does not include clie
 - A position-ledger builder that handles buys, cash contributions, dividends, and stock splits.
 - A daily NAV engine that calculates market value, cash, total NAV, and NAV per share.
 - A reconciliation engine that compares internal NAV and positions against custodian-style records.
-- A break report that classifies NAV, position, price, and missing-security exceptions by severity.
+- A break report that classifies NAV, position, price, missing-security and missing-NAV-source exceptions by severity.
 - SQLite persistence for daily positions, NAV, reconciliation records, breaks, and run logs.
 - CSV and JSON output packs for review.
 - A pytest suite covering NAV, positions, and reconciliation behavior.
@@ -80,11 +80,19 @@ Run tests:
 pytest -q
 ```
 
-Expected validation result:
+The regression suite covers split chronology, reverse/multiple splits, dividend entitlement, missing custodian/internal records, duplicate NAV keys, invalid values, review status and clearing resolved breaks on reruns. GitHub Actions runs the suite on Linux and Windows.
 
-```text
-10 passed
-```
+## Reconciliation and corporate-action conventions
+
+- A missing NAV record on either side is a high-severity exception, including a missing matching fund or date. Duplicate fund/date NAV keys and nonfinite NAV/cash values reject the run.
+- A completed run with any exceptions is `REVIEW_REQUIRED` in its result, saved summary and database log. `SUCCESS` means the comparison completed without exceptions; it is not regulatory sign-off.
+- Trades are recorded in the share units effective on their date. Date-only splits take effect before that day's trades, so each split changes only earlier quantities. For example, 100 shares before a 2:1 split plus 10 bought afterward produces 210 shares.
+- Generated dividend flows use holdings entering the ex-date, adjusted for splits effective by that date. Trades on the ex-date are excluded from dividend entitlement; existing booked dividends are not generated again. Cash is recorded on the ex-date in this simplified demo rather than a separate payment date.
+- The existing synthetic-price convention supplies a pre-split quote on the split date and divides it by that day's split ratio. Use prices consistent with this demo convention; vendor-adjusted prices require explicit normalization first.
+- Rerunning a fund/date replaces its saved positions and exceptions, including clearing records after a position closes or a break resolves.
+- Database replacement is one transaction across positions, NAV, exceptions and success logs. A write failure rolls back the entire replacement, preserving the prior committed records.
+- A failed rerun marks the affected output summaries `FAILED`, removes current export references and clears summary NAV values. Earlier or partial CSV files and the last committed database rows remain for investigation; they do not validate the failed attempt. If any fund fails in an all-fund run, every selected fund's pack is marked failed because the combined database write did not complete.
+- Saved summary export paths are filenames relative to the output pack, so reports remain portable between machines.
 
 ## Project Structure
 
