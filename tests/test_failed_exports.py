@@ -5,6 +5,7 @@ import sqlite3
 
 import pandas as pd
 import pytest
+import yaml
 
 from src import run_daily as runner
 
@@ -119,3 +120,32 @@ def test_database_failure_after_position_insert_restores_prior_rows():
             runner._write_to_sqlite(connection, positions.assign(quantity_eod=2.0), nav.assign(total_nav=200.0), breaks.iloc[:0], [])
         after = {table: connection.execute(f"SELECT * FROM {table}").fetchall() for table in tables}
         assert after == before
+
+
+@pytest.mark.parametrize("failure_stage", ["missing_policy", "invalid_policy", "missing_schema", "database_open"])
+def test_setup_failure_invalidates_previous_pack_and_preserves_original_error(tmp_path, monkeypatch, failure_stage):
+    monkeypatch.setattr(runner, "DB_PATH", tmp_path / "nav.db")
+    monkeypatch.setattr(runner, "OUTPUT_DIR", tmp_path / "outputs")
+    pack = runner.OUTPUT_DIR / "2024-01-05_FUND1"
+    pack.mkdir(parents=True)
+    (pack / "summary.json").write_text(json.dumps({"status": "SUCCESS", "total_nav": 100}), encoding="utf-8")
+    if failure_stage == "missing_policy":
+        monkeypatch.setattr(runner, "POLICY_PATH", tmp_path / "missing-policy.yaml")
+        expected_error = FileNotFoundError
+    elif failure_stage == "invalid_policy":
+        policy = tmp_path / "invalid-policy.yaml"
+        policy.write_text("cash_interest_rate: [broken", encoding="utf-8")
+        monkeypatch.setattr(runner, "POLICY_PATH", policy)
+        expected_error = yaml.YAMLError
+    elif failure_stage == "missing_schema":
+        monkeypatch.setattr(runner, "DDL_PATH", tmp_path / "missing-schema.sql")
+        expected_error = FileNotFoundError
+    else:
+        runner.DB_PATH.mkdir()
+        expected_error = sqlite3.OperationalError
+    with pytest.raises(expected_error):
+        runner.run_daily(pd.Timestamp("2024-01-05"), tmp_path / "inputs", "FUND1")
+    summary = json.loads((pack / "summary.json").read_text(encoding="utf-8"))
+    assert summary["status"] == "FAILED"
+    assert summary["total_nav"] is None
+    assert summary["exports"] == {}

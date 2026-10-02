@@ -344,25 +344,25 @@ def _combine_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
 
 
 def run_daily(asof_date: pd.Timestamp, data_dir: Path, fund_id: str | None = None) -> dict[str, Any]:
-    policy = _load_policy(POLICY_PATH)
     asof = pd.Timestamp(asof_date).normalize()
     asof_str = asof.strftime("%Y-%m-%d")
     data_source = _data_source_label(data_dir)
-    sofr_rate = float(policy.get("cash_interest_rate", 0.0))
     run_ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-    positions_module.MAX_PRICE_STALENESS_DAYS = int(policy.get("max_price_staleness_days", 3))
-    positions_module.PRICE_SOURCE_PRIORITY = tuple(
-        policy.get("price_source_priority", ["internal", "vendor", "fallback"])
-    )
-
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DB_PATH)
+    connection: sqlite3.Connection | None = None
     current_fund_id = fund_id or "ALL_FUNDS"
     fund_ids: list[str] = []
     try:
-        _ensure_schema(connection, DDL_PATH)
         try:
+            policy = _load_policy(POLICY_PATH)
+            sofr_rate = float(policy.get("cash_interest_rate", 0.0))
+            positions_module.MAX_PRICE_STALENESS_DAYS = int(policy.get("max_price_staleness_days", 3))
+            positions_module.PRICE_SOURCE_PRIORITY = tuple(
+                policy.get("price_source_priority", ["internal", "vendor", "fallback"])
+            )
+            DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(DB_PATH)
+            _ensure_schema(connection, DDL_PATH)
             LOGGER.info("Running NAV-Recon for %s (%s data)", asof_str, data_source)
             inputs = _read_inputs(data_dir)
             inputs["custodian_nav"]["date"] = inputs["custodian_nav"]["date"].dt.strftime("%Y-%m-%d")
@@ -441,11 +441,16 @@ def run_daily(asof_date: pd.Timestamp, data_dir: Path, fund_id: str | None = Non
                 data_dir=data_dir,
                 status=f"FAILED: {exc}",
             )
-            _log_failed_run(connection, failure_log)
+            if connection is not None:
+                try:
+                    _log_failed_run(connection, failure_log)
+                except sqlite3.Error:
+                    LOGGER.exception("Unable to save the failure log; preserving the original error")
             LOGGER.exception("NAV-Recon run failed for %s", asof_str)
             raise
     finally:
-        connection.close()
+        if connection is not None:
+            connection.close()
 
 
 def main() -> None:
