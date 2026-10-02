@@ -107,10 +107,12 @@ def _write_to_sqlite(
     run_logs: list[dict[str, Any]],
 ) -> None:
     with connection:
-        _replace_existing_rows(connection, "nav_daily_positions", positions)
+        # NAV keys define the complete rerun scope even when positions or breaks
+        # are now empty; otherwise resolved exceptions survive in the database.
+        _replace_existing_rows(connection, "nav_daily_positions", nav)
         _replace_existing_rows(connection, "nav_daily_nav", nav)
-        _replace_existing_rows(connection, "nav_reconciliation", reconciliation)
-        _replace_existing_rows(connection, "nav_breaks", reconciliation)
+        _replace_existing_rows(connection, "nav_reconciliation", nav)
+        _replace_existing_rows(connection, "nav_breaks", nav)
 
         if not positions.empty:
             positions.to_sql("nav_daily_positions", connection, if_exists="append", index=False)
@@ -219,7 +221,7 @@ def _run_single_fund(
 
     blotter = _augment_blotter_for_corporate_actions(
         blotter=blotter,
-        corporate_actions=inputs["corporate_actions"],
+        corporate_actions=inputs["corporate_actions"] if corporate_actions_enabled else inputs["corporate_actions"].iloc[:0],
         fund_id=fund_id,
         asof_date=asof,
         corporate_actions_enabled=corporate_actions_enabled,
@@ -230,7 +232,7 @@ def _run_single_fund(
         prices=inputs["prices"],
         fx_rates=inputs["fx_rates"],
         security_master=inputs["security_master"],
-        corporate_actions=inputs["corporate_actions"],
+        corporate_actions=inputs["corporate_actions"] if corporate_actions_enabled else inputs["corporate_actions"].iloc[:0],
         base_currency=str(policy.get("base_currency", "USD")),
         asof_date=asof,
     )
@@ -268,6 +270,7 @@ def _run_single_fund(
     nav_row = nav.iloc[0].to_dict() if not nav.empty else {}
     break_count = int(len(reconciliation))
     high_breaks = int((reconciliation["severity"] == "HIGH").sum()) if not reconciliation.empty else 0
+    status = "REVIEW_REQUIRED" if break_count else "SUCCESS"
 
     run_log = _build_run_log(
         run_ts=run_ts,
@@ -278,7 +281,7 @@ def _run_single_fund(
         break_count=break_count,
         high_severity_breaks=high_breaks,
         data_dir=data_dir,
-        status="SUCCESS",
+        status=status,
     )
     result = {
         "run_ts": run_ts,
@@ -288,6 +291,7 @@ def _run_single_fund(
         "nav_per_share": round(float(nav_row.get("nav_per_share", 0.0)), 6),
         "break_count": break_count,
         "high_severity_breaks": high_breaks,
+        "status": status,
         "exports_path": str(export_path),
         "data_source": data_source,
         "sofr_rate": sofr_rate,
@@ -372,6 +376,7 @@ def run_daily(asof_date: pd.Timestamp, data_dir: Path, fund_id: str | None = Non
                 "fund_count": len(results),
                 "break_count": int(sum(item["break_count"] for item in results)),
                 "high_severity_breaks": int(sum(item["high_severity_breaks"] for item in results)),
+                "status": "REVIEW_REQUIRED" if any(item["break_count"] for item in results) else "SUCCESS",
                 "data_source": data_source,
                 "sofr_rate": sofr_rate,
                 "runs": results,

@@ -48,6 +48,27 @@ def _normalize_datetime(series: pd.Series) -> pd.Series:
     return pd.to_datetime(series).dt.normalize()
 
 
+def _adjust_trade_quantities(trades: pd.DataFrame, split_actions: pd.DataFrame) -> pd.DataFrame:
+    """Apply each split only to trades booked before its effective date.
+
+    Date-only records assume splits take effect before that day's trades.
+    """
+    adjusted = trades.copy()
+    quantity = pd.to_numeric(adjusted["quantity"], errors="raise").astype(float)
+    if not np.isfinite(quantity).all() or quantity.lt(0).any():
+        raise ValueError("Trade quantities must be finite and nonnegative.")
+    adjusted["signed_quantity"] = np.where(
+        adjusted["txn_type"].eq("BUY"), quantity, -quantity
+    )
+    for action in split_actions.itertuples(index=False):
+        ratio = float(action.ratio)
+        if not np.isfinite(ratio) or ratio <= 0:
+            raise ValueError("Split ratios must be finite and positive.")
+        affected = adjusted["security_id"].eq(action.security_id) & adjusted["date"].lt(action.ex_date)
+        adjusted.loc[affected, "signed_quantity"] *= ratio
+    return adjusted
+
+
 def _latest_price_snapshot(prices: pd.DataFrame, asof_date: pd.Timestamp) -> pd.DataFrame:
     price_frame = prices.loc[prices["date"] <= asof_date].copy()
     if price_frame.empty:
@@ -148,61 +169,25 @@ def build_corporate_action_cash_flows(
         return _empty_blotter_like(blotter)
 
     trades = blotter_frame.loc[
-        blotter_frame["txn_type"].isin(["BUY", "SELL"]),
+        blotter_frame["fund_id"].eq(fund_id) & blotter_frame["txn_type"].isin(["BUY", "SELL"]),
         ["date", "security_id", "txn_type", "quantity"],
     ].copy()
     if trades.empty:
         return _empty_blotter_like(blotter)
 
-    trades["signed_quantity"] = np.where(trades["txn_type"].eq("BUY"), trades["quantity"], -trades["quantity"])
-    quantity_history = (
-        trades.groupby(["security_id", "date"], as_index=False)["signed_quantity"]
-        .sum()
-        .sort_values(["security_id", "date"])
-    )
-    quantity_history["cum_quantity"] = quantity_history.groupby("security_id")["signed_quantity"].cumsum()
-
     split_actions = corporate_actions_frame.loc[
         (corporate_actions_frame["action_type"] == "SPLIT")
         & (corporate_actions_frame["ex_date"] <= asof)
     ].copy()
-    if split_actions.empty:
-        split_history = pd.DataFrame(columns=["security_id", "ex_date", "cum_split"])
-    else:
-        split_history = (
-            split_actions.groupby(["security_id", "ex_date"], as_index=False)["ratio"]
-            .prod()
-            .sort_values(["security_id", "ex_date"])
-        )
-        split_history["cum_split"] = split_history.groupby("security_id")["ratio"].cumprod()
-
-    dividend_actions = dividend_actions.sort_values(["security_id", "ex_date"])
-    quantity_history = quantity_history.rename(columns={"date": "event_date"})
-    split_history = split_history.rename(columns={"ex_date": "split_date"})
-
-    dividend_actions = pd.merge_asof(
-        dividend_actions.sort_values(["ex_date", "security_id"]),
-        quantity_history.sort_values(["event_date", "security_id"]),
-        left_on="ex_date",
-        right_on="event_date",
-        by="security_id",
-        direction="backward",
-    )
-    if split_history.empty:
-        dividend_actions["cum_split"] = 1.0
-    else:
-        dividend_actions = pd.merge_asof(
-            dividend_actions.sort_values(["ex_date", "security_id"]),
-            split_history.sort_values(["split_date", "security_id"]),
-            left_on="ex_date",
-            right_on="split_date",
-            by="security_id",
-            direction="backward",
-        )
-
-    dividend_actions["cum_quantity"] = dividend_actions["cum_quantity"].fillna(0.0)
-    dividend_actions["cum_split"] = dividend_actions["cum_split"].fillna(1.0)
-    dividend_actions["held_quantity"] = dividend_actions["cum_quantity"] * dividend_actions["cum_split"]
+    held_quantities = []
+    for dividend in dividend_actions.itertuples(index=False):
+        eligible_trades = trades.loc[
+            trades["security_id"].eq(dividend.security_id) & trades["date"].lt(dividend.ex_date)
+        ]
+        effective_splits = split_actions.loc[split_actions["ex_date"].le(dividend.ex_date)]
+        adjusted = _adjust_trade_quantities(eligible_trades, effective_splits)
+        held_quantities.append(float(adjusted["signed_quantity"].sum()))
+    dividend_actions["held_quantity"] = held_quantities
 
     synthetic_flows = dividend_actions.loc[dividend_actions["held_quantity"] > 0].copy()
     if synthetic_flows.empty:
@@ -270,11 +255,11 @@ def build_positions(
     if trades.empty:
         return _empty_positions_frame()
 
-    trades["signed_quantity"] = np.where(
-        trades["txn_type"].eq("BUY"),
-        trades["quantity"],
-        -trades["quantity"],
-    )
+    split_actions = corporate_actions_frame.loc[
+        corporate_actions_frame["action_type"].eq("SPLIT")
+        & corporate_actions_frame["ex_date"].le(asof)
+    ].copy()
+    trades = _adjust_trade_quantities(trades, split_actions)
 
     positions = (
         trades.groupby(["fund_id", "security_id"], as_index=False)["signed_quantity"]
@@ -284,21 +269,6 @@ def build_positions(
     positions = positions.loc[positions["quantity_eod"].abs() > 1e-9].copy()
     if positions.empty:
         return _empty_positions_frame()
-
-    split_actions = corporate_actions_frame.loc[
-        (corporate_actions_frame["action_type"] == "SPLIT")
-        & (corporate_actions_frame["ex_date"] <= asof)
-    ].copy()
-    split_ratios = (
-        split_actions.groupby("security_id", as_index=False)["ratio"]
-        .prod()
-        .rename(columns={"ratio": "split_ratio"})
-        if not split_actions.empty
-        else pd.DataFrame(columns=["security_id", "split_ratio"])
-    )
-    positions = positions.merge(split_ratios, on="security_id", how="left")
-    positions["split_ratio"] = pd.to_numeric(positions["split_ratio"], errors="coerce").fillna(1.0)
-    positions["quantity_eod"] = positions["quantity_eod"] * positions["split_ratio"]
 
     positions = positions.merge(
         master_frame[

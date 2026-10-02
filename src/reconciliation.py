@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass
 
 import pandas as pd
@@ -24,6 +25,8 @@ RESOLUTION_TEXT = {
     "PRICE_BREAK": "Verify price source and override if custodian price is confirmed.",
     "CASH_BREAK": "Trace cash movements against custodian cash statement.",
     "MISSING_POSITION": "Confirm trade booking - position exists in one source only.",
+    "MISSING_CUSTODIAN": "Obtain the missing custodian NAV record before reconciliation sign-off.",
+    "MISSING_INTERNAL_NAV": "Calculate the missing internal NAV before reconciliation sign-off.",
     "STALE_PRICE": "Request fresh price from vendor or apply override.",
     "MERGER": "Review merger terms and update security mapping manually.",
 }
@@ -60,7 +63,7 @@ def _resolve_severity(break_type: str, diff_bps: float | None) -> str:
         return "LOW"
     if break_type in {"POSITION_BREAK", "PRICE_BREAK", "CASH_BREAK", "MERGER"}:
         return "MEDIUM"
-    if break_type == "MISSING_POSITION":
+    if break_type in {"MISSING_POSITION", "MISSING_CUSTODIAN", "MISSING_INTERNAL_NAV"}:
         return "HIGH"
     if break_type == "STALE_PRICE":
         return "LOW"
@@ -113,23 +116,59 @@ def run_reconciliation(
     positions: pd.DataFrame,
     tolerance_bps: float,
 ) -> pd.DataFrame:
-    if internal_nav.empty or custodian_nav.empty:
+    if internal_nav.empty and custodian_nav.empty:
         return _empty_reconciliation_frame()
 
     internal_nav_frame = internal_nav.copy()
     custodian_nav_frame = custodian_nav.copy()
     positions_frame = positions.copy()
 
+    keys = ["date", "fund_id"]
+    for name, frame, values in (
+        ("Internal", internal_nav_frame, ["total_nav", "cash_balance"]),
+        ("Custodian", custodian_nav_frame, ["custodian_nav", "custodian_cash", "custodian_positions"]),
+    ):
+        if frame.empty:
+            for column in keys + values:
+                if column not in frame:
+                    frame[column] = pd.Series(dtype=object)
+        frame["date"] = pd.to_datetime(frame["date"]).dt.strftime("%Y-%m-%d")
+        if frame[keys].isna().any().any():
+            raise ValueError(f"{name} NAV date and fund_id must be present.")
+        if frame.duplicated(keys).any():
+            raise ValueError(f"{name} NAV must have one record per date and fund_id.")
+        for column in values[:2]:
+            frame[column] = pd.to_numeric(frame[column], errors="raise")
+            if not frame[column].map(math.isfinite).all():
+                raise ValueError(f"{name} NAV values must be finite.")
+    if not positions_frame.empty:
+        positions_frame["date"] = pd.to_datetime(positions_frame["date"]).dt.strftime("%Y-%m-%d")
+
     merged_nav = internal_nav_frame.merge(
         custodian_nav_frame,
         on=["date", "fund_id"],
-        how="inner",
+        how="outer",
+        indicator=True,
+        validate="one_to_one",
     )
     if merged_nav.empty:
         return _empty_reconciliation_frame()
 
     records: list[BreakRecord] = []
-    for row in merged_nav.itertuples(index=False):
+    for _, nav_record in merged_nav.iterrows():
+        if nav_record["_merge"] != "both":
+            missing_custodian = nav_record["_merge"] == "left_only"
+            records.append(_make_break_record(
+                date=nav_record["date"],
+                fund_id=nav_record["fund_id"],
+                break_type="MISSING_CUSTODIAN" if missing_custodian else "MISSING_INTERNAL_NAV",
+                internal_value=float(nav_record["total_nav"]) if missing_custodian else None,
+                custodian_value=None if missing_custodian else float(nav_record["custodian_nav"]),
+                diff_bps=None,
+                details="NAV record is missing from one source for this fund and date; reconciliation is incomplete.",
+            ))
+    matched_nav = merged_nav.loc[merged_nav["_merge"].eq("both")].drop(columns="_merge")
+    for row in matched_nav.itertuples(index=False):
         nav_diff_bps = _calc_bps(float(row.total_nav), float(row.custodian_nav))
         if nav_diff_bps > tolerance_bps:
             records.append(
