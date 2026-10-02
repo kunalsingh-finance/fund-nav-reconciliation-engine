@@ -90,3 +90,32 @@ def test_partial_all_fund_failure_blocks_every_pack_and_recovers(tmp_path, monke
     for fund in ("FUND1", "FUND2"):
         summary = runner.OUTPUT_DIR / f"2024-01-05_{fund}" / "summary.json"
         assert json.loads(summary.read_text(encoding="utf-8"))["status"] == "SUCCESS"
+
+
+def test_database_failure_after_position_insert_restores_prior_rows():
+    positions = pd.DataFrame([dict(
+        date="2024-01-05", fund_id="FUND1", security_id="AAPL", quantity_eod=1.0,
+        price_local=50.0, security_currency="USD", fx_to_base=1.0,
+        market_value_base=50.0, corporate_action_flag="",
+    )])
+    nav = pd.DataFrame([dict(
+        date="2024-01-05", fund_id="FUND1", securities_mv=50.0, cash_balance=50.0,
+        accrued_income=0.0, total_nav=100.0, shares_outstanding=100.0, nav_per_share=1.0,
+    )])
+    breaks = pd.DataFrame([dict(
+        date="2024-01-05", fund_id="FUND1", break_type="NAV_DIFF", severity="HIGH",
+        internal_value=100.0, custodian_value=90.0, diff_bps=1000.0,
+        details="Review", resolution="Investigate",
+    )])
+    with sqlite3.connect(":memory:") as connection:
+        runner._ensure_schema(connection, runner.DDL_PATH)
+        runner._write_to_sqlite(connection, positions, nav, breaks, [])
+        tables = ("nav_daily_positions", "nav_daily_nav", "nav_reconciliation", "nav_breaks")
+        before = {table: connection.execute(f"SELECT * FROM {table}").fetchall() for table in tables}
+        connection.execute("""CREATE TRIGGER reject_nav BEFORE INSERT ON nav_daily_nav
+                              WHEN NEW.total_nav = 200 BEGIN SELECT RAISE(ABORT, 'Rejected NAV'); END""")
+        connection.commit()
+        with pytest.raises(sqlite3.IntegrityError, match="Rejected NAV"):
+            runner._write_to_sqlite(connection, positions.assign(quantity_eod=2.0), nav.assign(total_nav=200.0), breaks.iloc[:0], [])
+        after = {table: connection.execute(f"SELECT * FROM {table}").fetchall() for table in tables}
+        assert after == before

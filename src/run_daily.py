@@ -99,6 +99,22 @@ def _insert_run_log(connection: sqlite3.Connection, run_log: dict[str, Any]) -> 
     )
 
 
+def _append_sqlite_rows(connection: sqlite3.Connection, table_name: str, frame: pd.DataFrame) -> None:
+    if frame.empty:
+        return
+    values = frame.copy()
+    for column in values.columns:
+        if pd.api.types.is_datetime64_any_dtype(values[column]):
+            values[column] = values[column].dt.strftime("%Y-%m-%d")
+    values = values.astype(object).where(pd.notna(values), None)
+    columns = ", ".join('"' + str(column).replace('"', '""') + '"' for column in values.columns)
+    parameters = ", ".join("?" for _ in values.columns)
+    connection.executemany(
+        f"INSERT INTO {table_name} ({columns}) VALUES ({parameters})",
+        values.itertuples(index=False, name=None),
+    )
+
+
 def _write_to_sqlite(
     connection: sqlite3.Connection,
     positions: pd.DataFrame,
@@ -114,13 +130,12 @@ def _write_to_sqlite(
         _replace_existing_rows(connection, "nav_reconciliation", nav)
         _replace_existing_rows(connection, "nav_breaks", nav)
 
-        if not positions.empty:
-            positions.to_sql("nav_daily_positions", connection, if_exists="append", index=False)
-        if not nav.empty:
-            nav.to_sql("nav_daily_nav", connection, if_exists="append", index=False)
-        if not reconciliation.empty:
-            reconciliation.to_sql("nav_reconciliation", connection, if_exists="append", index=False)
-            reconciliation.to_sql("nav_breaks", connection, if_exists="append", index=False)
+        # pandas.to_sql commits a raw sqlite3 connection after each append,
+        # defeating this transaction and leaving partial reruns after a failure.
+        _append_sqlite_rows(connection, "nav_daily_positions", positions)
+        _append_sqlite_rows(connection, "nav_daily_nav", nav)
+        _append_sqlite_rows(connection, "nav_reconciliation", reconciliation)
+        _append_sqlite_rows(connection, "nav_breaks", reconciliation)
 
         for run_log in run_logs:
             _insert_run_log(connection, run_log)
