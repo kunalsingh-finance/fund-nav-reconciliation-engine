@@ -15,6 +15,33 @@ def _prepare_export_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return output
 
 
+def mark_output_pack_failed(
+    export_dir: Path,
+    asof: str,
+    fund_id: str,
+    error: str,
+    run_ts: str,
+) -> None:
+    """Invalidate a prior or partial pack without deleting its evidence files."""
+    export_dir.mkdir(parents=True, exist_ok=True)
+    summary = {
+        "asof_date": asof,
+        "fund_id": fund_id,
+        "run_ts": run_ts,
+        "status": "FAILED",
+        "error": error,
+        "total_nav": None,
+        "nav_per_share": None,
+        "break_count": None,
+        "high_severity_breaks": None,
+        "exports": {},
+        "notice": "CSV files from an earlier or partial run may remain; they do not validate this failed attempt.",
+    }
+    temporary = export_dir / "summary.json.tmp"
+    temporary.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    temporary.replace(export_dir / "summary.json")
+
+
 def export_output_pack(
     positions: pd.DataFrame,
     nav: pd.DataFrame,

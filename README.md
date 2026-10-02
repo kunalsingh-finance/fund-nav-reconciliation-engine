@@ -90,6 +90,7 @@ The regression suite covers split chronology, reverse/multiple splits, dividend 
 - Generated dividend flows use holdings entering the ex-date, adjusted for splits effective by that date. Trades on the ex-date are excluded from dividend entitlement; existing booked dividends are not generated again. Cash is recorded on the ex-date in this simplified demo rather than a separate payment date.
 - The existing synthetic-price convention supplies a pre-split quote on the split date and divides it by that day's split ratio. Use prices consistent with this demo convention; vendor-adjusted prices require explicit normalization first.
 - Rerunning a fund/date replaces its saved positions and exceptions, including clearing records after a position closes or a break resolves.
+- A failed rerun marks the affected output summaries `FAILED`, removes current export references and clears summary NAV values. Earlier or partial CSV files and the last committed database rows remain for investigation; they do not validate the failed attempt. If any fund fails in an all-fund run, every selected fund's pack is marked failed because the combined database write did not complete.
 - Saved summary export paths are filenames relative to the output pack, so reports remain portable between machines.
 
 ## Project Structure

@@ -15,7 +15,7 @@ from . import positions as positions_module
 from .nav import compute_daily_nav
 from .positions import build_corporate_action_cash_flows, build_positions
 from .reconciliation import run_reconciliation
-from .report import export_output_pack
+from .report import export_output_pack, mark_output_pack_failed
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -129,6 +129,28 @@ def _write_to_sqlite(
 def _log_failed_run(connection: sqlite3.Connection, run_log: dict[str, Any]) -> None:
     with connection:
         _insert_run_log(connection, run_log)
+
+
+def _mark_failed_exports(
+    asof: str,
+    explicit_fund_id: str | None,
+    selected_funds: list[str],
+    error: str,
+    run_ts: str,
+) -> None:
+    targets = {OUTPUT_DIR / f"{asof}_{fund}" for fund in selected_funds}
+    if explicit_fund_id is not None:
+        targets.add(OUTPUT_DIR / f"{asof}_{explicit_fund_id}")
+    else:
+        # An input-read failure occurs before we can discover funds. A requested
+        # all-fund rerun must still invalidate earlier packs for this date.
+        targets.update(path for path in OUTPUT_DIR.glob(f"{asof}_*") if path.is_dir())
+    root = OUTPUT_DIR.resolve()
+    for target in targets:
+        if target.resolve().parent != root:
+            LOGGER.error("Cannot invalidate an output pack outside the output directory")
+            continue
+        mark_output_pack_failed(target, asof, target.name[len(asof) + 1:], error, run_ts)
 
 
 def _data_source_label(data_dir: Path) -> str:
@@ -322,6 +344,7 @@ def run_daily(asof_date: pd.Timestamp, data_dir: Path, fund_id: str | None = Non
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH)
     current_fund_id = fund_id or "ALL_FUNDS"
+    fund_ids: list[str] = []
     try:
         _ensure_schema(connection, DDL_PATH)
         try:
@@ -388,6 +411,10 @@ def run_daily(asof_date: pd.Timestamp, data_dir: Path, fund_id: str | None = Non
             )
             return summary
         except Exception as exc:
+            try:
+                _mark_failed_exports(asof_str, fund_id, fund_ids, str(exc), run_ts)
+            except OSError:
+                LOGGER.exception("Unable to mark output summaries as failed")
             failure_log = _build_run_log(
                 run_ts=run_ts,
                 asof_date=asof_str,
