@@ -10,7 +10,7 @@ Trade blotter -> Position ledger -> Daily NAV -> Custodian comparison -> Break r
 
 The bundled inputs are synthetic demo records. The project does not include client data, custodian files, bank records, account identifiers, credentials, or proprietary fund data.
 
-## What I Built
+## Workflow
 
 - A synthetic fund input generator for trades, prices, FX, security master records, corporate actions, and custodian NAV records.
 - A position-ledger builder that handles buys, cash contributions, dividends, and stock splits.
@@ -109,7 +109,7 @@ fund-nav-reconciliation-engine/
 `-- tests/
 ```
 
-## Skills Demonstrated
+## Methods and Controls
 
 - Investment operations workflow design
 - NAV calculation and fund accounting logic
