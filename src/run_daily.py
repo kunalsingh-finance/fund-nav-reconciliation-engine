@@ -15,7 +15,7 @@ from . import positions as positions_module
 from .nav import compute_daily_nav
 from .positions import build_corporate_action_cash_flows, build_positions
 from .reconciliation import run_reconciliation
-from .report import export_output_pack
+from .report import export_output_pack, mark_output_pack_failed
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -99,6 +99,22 @@ def _insert_run_log(connection: sqlite3.Connection, run_log: dict[str, Any]) -> 
     )
 
 
+def _append_sqlite_rows(connection: sqlite3.Connection, table_name: str, frame: pd.DataFrame) -> None:
+    if frame.empty:
+        return
+    values = frame.copy()
+    for column in values.columns:
+        if pd.api.types.is_datetime64_any_dtype(values[column]):
+            values[column] = values[column].dt.strftime("%Y-%m-%d")
+    values = values.astype(object).where(pd.notna(values), None)
+    columns = ", ".join('"' + str(column).replace('"', '""') + '"' for column in values.columns)
+    parameters = ", ".join("?" for _ in values.columns)
+    connection.executemany(
+        f"INSERT INTO {table_name} ({columns}) VALUES ({parameters})",
+        values.itertuples(index=False, name=None),
+    )
+
+
 def _write_to_sqlite(
     connection: sqlite3.Connection,
     positions: pd.DataFrame,
@@ -107,18 +123,19 @@ def _write_to_sqlite(
     run_logs: list[dict[str, Any]],
 ) -> None:
     with connection:
-        _replace_existing_rows(connection, "nav_daily_positions", positions)
+        # NAV keys define the complete rerun scope even when positions or breaks
+        # are now empty; otherwise resolved exceptions survive in the database.
+        _replace_existing_rows(connection, "nav_daily_positions", nav)
         _replace_existing_rows(connection, "nav_daily_nav", nav)
-        _replace_existing_rows(connection, "nav_reconciliation", reconciliation)
-        _replace_existing_rows(connection, "nav_breaks", reconciliation)
+        _replace_existing_rows(connection, "nav_reconciliation", nav)
+        _replace_existing_rows(connection, "nav_breaks", nav)
 
-        if not positions.empty:
-            positions.to_sql("nav_daily_positions", connection, if_exists="append", index=False)
-        if not nav.empty:
-            nav.to_sql("nav_daily_nav", connection, if_exists="append", index=False)
-        if not reconciliation.empty:
-            reconciliation.to_sql("nav_reconciliation", connection, if_exists="append", index=False)
-            reconciliation.to_sql("nav_breaks", connection, if_exists="append", index=False)
+        # pandas.to_sql commits a raw sqlite3 connection after each append,
+        # defeating this transaction and leaving partial reruns after a failure.
+        _append_sqlite_rows(connection, "nav_daily_positions", positions)
+        _append_sqlite_rows(connection, "nav_daily_nav", nav)
+        _append_sqlite_rows(connection, "nav_reconciliation", reconciliation)
+        _append_sqlite_rows(connection, "nav_breaks", reconciliation)
 
         for run_log in run_logs:
             _insert_run_log(connection, run_log)
@@ -127,6 +144,28 @@ def _write_to_sqlite(
 def _log_failed_run(connection: sqlite3.Connection, run_log: dict[str, Any]) -> None:
     with connection:
         _insert_run_log(connection, run_log)
+
+
+def _mark_failed_exports(
+    asof: str,
+    explicit_fund_id: str | None,
+    selected_funds: list[str],
+    error: str,
+    run_ts: str,
+) -> None:
+    targets = {OUTPUT_DIR / f"{asof}_{fund}" for fund in selected_funds}
+    if explicit_fund_id is not None:
+        targets.add(OUTPUT_DIR / f"{asof}_{explicit_fund_id}")
+    else:
+        # An input-read failure occurs before we can discover funds. A requested
+        # all-fund rerun must still invalidate earlier packs for this date.
+        targets.update(path for path in OUTPUT_DIR.glob(f"{asof}_*") if path.is_dir())
+    root = OUTPUT_DIR.resolve()
+    for target in targets:
+        if target.resolve().parent != root:
+            LOGGER.error("Cannot invalidate an output pack outside the output directory")
+            continue
+        mark_output_pack_failed(target, asof, target.name[len(asof) + 1:], error, run_ts)
 
 
 def _data_source_label(data_dir: Path) -> str:
@@ -219,7 +258,7 @@ def _run_single_fund(
 
     blotter = _augment_blotter_for_corporate_actions(
         blotter=blotter,
-        corporate_actions=inputs["corporate_actions"],
+        corporate_actions=inputs["corporate_actions"] if corporate_actions_enabled else inputs["corporate_actions"].iloc[:0],
         fund_id=fund_id,
         asof_date=asof,
         corporate_actions_enabled=corporate_actions_enabled,
@@ -230,7 +269,7 @@ def _run_single_fund(
         prices=inputs["prices"],
         fx_rates=inputs["fx_rates"],
         security_master=inputs["security_master"],
-        corporate_actions=inputs["corporate_actions"],
+        corporate_actions=inputs["corporate_actions"] if corporate_actions_enabled else inputs["corporate_actions"].iloc[:0],
         base_currency=str(policy.get("base_currency", "USD")),
         asof_date=asof,
     )
@@ -268,6 +307,7 @@ def _run_single_fund(
     nav_row = nav.iloc[0].to_dict() if not nav.empty else {}
     break_count = int(len(reconciliation))
     high_breaks = int((reconciliation["severity"] == "HIGH").sum()) if not reconciliation.empty else 0
+    status = "REVIEW_REQUIRED" if break_count else "SUCCESS"
 
     run_log = _build_run_log(
         run_ts=run_ts,
@@ -278,7 +318,7 @@ def _run_single_fund(
         break_count=break_count,
         high_severity_breaks=high_breaks,
         data_dir=data_dir,
-        status="SUCCESS",
+        status=status,
     )
     result = {
         "run_ts": run_ts,
@@ -288,6 +328,7 @@ def _run_single_fund(
         "nav_per_share": round(float(nav_row.get("nav_per_share", 0.0)), 6),
         "break_count": break_count,
         "high_severity_breaks": high_breaks,
+        "status": status,
         "exports_path": str(export_path),
         "data_source": data_source,
         "sofr_rate": sofr_rate,
@@ -303,24 +344,25 @@ def _combine_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
 
 
 def run_daily(asof_date: pd.Timestamp, data_dir: Path, fund_id: str | None = None) -> dict[str, Any]:
-    policy = _load_policy(POLICY_PATH)
     asof = pd.Timestamp(asof_date).normalize()
     asof_str = asof.strftime("%Y-%m-%d")
     data_source = _data_source_label(data_dir)
-    sofr_rate = float(policy.get("cash_interest_rate", 0.0))
     run_ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-    positions_module.MAX_PRICE_STALENESS_DAYS = int(policy.get("max_price_staleness_days", 3))
-    positions_module.PRICE_SOURCE_PRIORITY = tuple(
-        policy.get("price_source_priority", ["internal", "vendor", "fallback"])
-    )
-
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DB_PATH)
+    connection: sqlite3.Connection | None = None
     current_fund_id = fund_id or "ALL_FUNDS"
+    fund_ids: list[str] = []
     try:
-        _ensure_schema(connection, DDL_PATH)
         try:
+            policy = _load_policy(POLICY_PATH)
+            sofr_rate = float(policy.get("cash_interest_rate", 0.0))
+            positions_module.MAX_PRICE_STALENESS_DAYS = int(policy.get("max_price_staleness_days", 3))
+            positions_module.PRICE_SOURCE_PRIORITY = tuple(
+                policy.get("price_source_priority", ["internal", "vendor", "fallback"])
+            )
+            DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(DB_PATH)
+            _ensure_schema(connection, DDL_PATH)
             LOGGER.info("Running NAV-Recon for %s (%s data)", asof_str, data_source)
             inputs = _read_inputs(data_dir)
             inputs["custodian_nav"]["date"] = inputs["custodian_nav"]["date"].dt.strftime("%Y-%m-%d")
@@ -372,6 +414,7 @@ def run_daily(asof_date: pd.Timestamp, data_dir: Path, fund_id: str | None = Non
                 "fund_count": len(results),
                 "break_count": int(sum(item["break_count"] for item in results)),
                 "high_severity_breaks": int(sum(item["high_severity_breaks"] for item in results)),
+                "status": "REVIEW_REQUIRED" if any(item["break_count"] for item in results) else "SUCCESS",
                 "data_source": data_source,
                 "sofr_rate": sofr_rate,
                 "runs": results,
@@ -383,6 +426,10 @@ def run_daily(asof_date: pd.Timestamp, data_dir: Path, fund_id: str | None = Non
             )
             return summary
         except Exception as exc:
+            try:
+                _mark_failed_exports(asof_str, fund_id, fund_ids, str(exc), run_ts)
+            except OSError:
+                LOGGER.exception("Unable to mark output summaries as failed")
             failure_log = _build_run_log(
                 run_ts=run_ts,
                 asof_date=asof_str,
@@ -394,11 +441,16 @@ def run_daily(asof_date: pd.Timestamp, data_dir: Path, fund_id: str | None = Non
                 data_dir=data_dir,
                 status=f"FAILED: {exc}",
             )
-            _log_failed_run(connection, failure_log)
+            if connection is not None:
+                try:
+                    _log_failed_run(connection, failure_log)
+                except sqlite3.Error:
+                    LOGGER.exception("Unable to save the failure log; preserving the original error")
             LOGGER.exception("NAV-Recon run failed for %s", asof_str)
             raise
     finally:
-        connection.close()
+        if connection is not None:
+            connection.close()
 
 
 def main() -> None:

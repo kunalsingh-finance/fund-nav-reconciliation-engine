@@ -5,10 +5,11 @@
   "nav_per_share": 1.0047252050041338,
   "break_count": 4,
   "high_severity_breaks": 2,
+  "status": "REVIEW_REQUIRED",
   "exports": {
-    "positions": "C:\\Users\\perso\\Documents\\github 2\\fund-nav-reconciliation-engine\\outputs\\2026-03-31_FUND1\\positions.csv",
-    "nav": "C:\\Users\\perso\\Documents\\github 2\\fund-nav-reconciliation-engine\\outputs\\2026-03-31_FUND1\\nav.csv",
-    "reconciliation": "C:\\Users\\perso\\Documents\\github 2\\fund-nav-reconciliation-engine\\outputs\\2026-03-31_FUND1\\reconciliation.csv",
-    "break_report": "C:\\Users\\perso\\Documents\\github 2\\fund-nav-reconciliation-engine\\outputs\\2026-03-31_FUND1\\break_report.csv"
+    "positions": "positions.csv",
+    "nav": "nav.csv",
+    "reconciliation": "reconciliation.csv",
+    "break_report": "break_report.csv"
   }
 }
